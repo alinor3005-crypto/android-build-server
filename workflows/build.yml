@@ -1,0 +1,88 @@
+name: Android Cloud Build
+
+on:
+  repository_dispatch:
+    types: [build-request]
+  workflow_dispatch:
+    inputs:
+      project_id:
+        description: 'Unique project ID'
+        required: true
+      user_token:
+        description: 'User auth token'
+        required: true
+
+env:
+  JAVA_VERSION: '17'
+  ANDROID_API: '34'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Install required SDK components
+        run: |
+          sdkmanager "platforms;android-${{ env.ANDROID_API }}" "build-tools;34.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Build Release APK (if signed)
+        if: success()
+        run: ./gradlew assembleRelease --stacktrace
+        continue-on-error: true
+
+      - name: Find APK files
+        id: find-apk
+        run: |
+          APK_PATH=$(find app/build/outputs/apk -name "*.apk" | head -1)
+          echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
+          echo "Found APK at: $APK_PATH"
+
+      - name: Upload APK as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ inputs.project_id || github.run_id }}
+          path: app/build/outputs/apk/**/*.apk
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Send completion webhook
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          PROJECT_ID="${{ inputs.project_id }}"
+          RUN_ID="${{ github.run_id }}"
+          ARTIFACT_NAME="app-${PROJECT_ID}"
+          
+          echo "Build completed with status: $STATUS"
+          echo "Project: $PROJECT_ID"
+          echo "Run ID: $RUN_ID"
+          echo "Artifact: $ARTIFACT_NAME"
+          
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"project_id\":\"$PROJECT_ID\",\"status\":\"$STATUS\",\"run_id\":\"$RUN_ID\",\"artifact\":\"$ARTIFACT_NAME\"}" \
+            "${{ secrets.WEBHOOK_URL }}/api/build-status" || true
